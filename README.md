@@ -1,1 +1,1 @@
-# simple-binance-bot
+A trading bot that executes a lIMIT order Binance futures trade and looks if the price is above the EMA. If it is, bot keeps on updating the limit price of the order. If not, it waits for the next bar to come.
