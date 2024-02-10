@@ -162,6 +162,7 @@ def check_order_status(client: Client, symbol_pair, order_id):
 
     try:
         order_status = client.futures_get_order(symbol=symbol_pair, orderId=order_id)
+        std_log("[%s] Order ID [%s] with status: [%s]" %(symbol_pair, order_id, order_status['status']))
         return order_status
     
     except Exception as e:
@@ -199,7 +200,6 @@ if __name__=="__main__":
 
     buy_timedelta[symbol_pair] = tdelta_conv[candle_timeframe]  
     old_remain_long_buy[symbol_pair] = datetime.timedelta(days=365)
-    showed_remain = datetime.timedelta(days=365)
 
     # Initializing the Binance API client based on the `demo` param
     client = Client()
@@ -209,8 +209,6 @@ if __name__=="__main__":
         client = Client(api_key=api_key, api_secret=api_secret, testnet=demo)
 
     order_id = 0
-    remain = boundaryRemaining(candle_timeframe)   # Remain time to buy candle closing
-    showed_remain = min(remain, showed_remain)
 
     initial_chart_df = fetch_and_store_data(client, symbol_pair, candle_timeframe)
     initialEMA = round(initial_chart_df['close'].ewm(span=moving_average_span, adjust=False).mean().iloc[-1], 4)
@@ -223,24 +221,32 @@ if __name__=="__main__":
 
     while True:
 
+
+        showed_remain = datetime.timedelta(days=365)
         status = check_order_status(client, symbol_pair, order_id)
 
+        remain = boundaryRemaining(candle_timeframe)   # Remain time to buy candle closing
+        showed_remain = min(remain, showed_remain)
+        
         if old_remain_long_buy[symbol_pair] < remain: # Get into new candle
 
-            std_log("[%s] New Bar: %s" %(symbol_pair, remain))
-
-            if status and status['status'] != 'FILLED':
+            if status['status'] != 'FILLED':
 
                 # Retrieving latest candles data:
                 chart_df = fetch_and_store_data(client, symbol_pair, candle_timeframe)
-            
+
                 # Removing the excessive candle
                 if chart_df.index[-1] > datetime.datetime.utcnow() - buy_timedelta[symbol_pair]/2:
                     chart_df = chart_df.iloc[:-1] 
 
+                std_log("[%s] New Bar: %s" %(symbol_pair, chart_df.iloc[-1]))
+
                 ema = round(chart_df['close'].ewm(span=moving_average_span, adjust=False).mean().iloc[-1], 4)
 
                 modify_order(client=client, symbol_pair=symbol_pair, order_id=order_id, buy_amount=buy_amount, new_price=ema)
+            
+            else:
+                break
 
 
         old_remain_long_buy[symbol_pair] = remain
