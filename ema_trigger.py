@@ -2,21 +2,22 @@ from binance.client import Client, BaseClient
 from pandas import DataFrame
 import pandas as pd # Run `pip install pyarrow` if deprecation notice occurs
 import time
-import openpyxl
 import datetime
-import os
-import math
 
+# To load the API_KEYs & API_SECRETs, we load them from a .env file
+from dotenv import load_dotenv
+import os
+load_dotenv() 
 
 # Configs for DEMO Account
-test_api_key='a279adac61711b474300df320a1fda8848b79acff304ab2191d0245198f9ce4a'
-test_api_secret='8797f1bbd9d44252b698f8dc7deec2ff26fb9e303adcdec83642a98990aee8e1'
+test_api_key=os.getenv('TEST_API_KEY')
+test_api_secret=os.getenv('TEST_API_SECRET')
 
 # Configs for REAL
 api_key = os.getenv('API_KEY')
 api_secret = os.getenv('API_SECRET')
 
-config_path = '/Users/konstantinborimechkov/Desktop/personalprojects/simple-binance-bot'
+config_path = str(os.getenv('CONFIG_PATH'))
 
 # Trade Configurations
 symbol_pair = 'BTCUSDT'
@@ -112,13 +113,6 @@ def fetch_and_store_data(client: Client, symbol, timeframe):
 
     return df
 
-def fetch_latest_closing_price(df: DataFrame):
-    if not df.empty:
-        latest_closing_price = df['close'].iloc[-1]  # Extract the last (latest) closing price
-        return latest_closing_price
-    else:
-        return None
-
 def get_precision_for_symbol(client: Client, symbol):
 
     exchange_info = client.futures_exchange_info()
@@ -136,17 +130,18 @@ def get_precision_for_symbol(client: Client, symbol):
         
     return None, None  # In case the symbol is not found
 
-def place_futures_order(client: Client, symbol_pair, buy_amount, last_close_price,
+def place_new_futures_order(client: Client, symbol_pair, buy_amount, limit_price,
                         positionSide = 'LONG',
                         side = BaseClient.SIDE_BUY, 
                         type = BaseClient.FUTURE_ORDER_TYPE_LIMIT):
 
     price_precision, quantity_precision = get_precision_for_symbol(client, symbol_pair)
-    price = round(last_close_price, price_precision)
-    quantity = round((buy_amount / last_close_price), quantity_precision)
+    price = round(limit_price, price_precision)
+    quantity = round((buy_amount / limit_price), quantity_precision)
 
     try:
-        order = client.futures_create_order(
+
+        order_info = client.futures_create_order(
             symbol=symbol_pair, 
             side=side,
             positionSide=positionSide,
@@ -155,13 +150,40 @@ def place_futures_order(client: Client, symbol_pair, buy_amount, last_close_pric
             quantity=quantity,
             timeInForce='GTC'
         )
+
+        std_log("[%s] LIMIT Buy Order Executed. Order Info: %s" %(symbol_pair, str(order_info)))
+        return order_info
+    
     except Exception as e:
         std_log("[%s] An error occured while making an order. Error Info: [%s]" %(symbol_pair, e))
-        return False
-    
-    std_log("[%s] LIMIT Buy Order Executed. Order Info: %s" %(symbol_pair, str(order)))
-    return True
+        return None
 
+def check_order_status(client: Client, symbol_pair, order_id):
+
+    try:
+        order_status = client.futures_get_order(symbol=symbol_pair, orderId=order_id)
+        return order_status
+    
+    except Exception as e:
+        std_log(f"[{symbol_pair}] Error checking order status. Error Info: {e}")
+        return None
+    
+def modify_order(client: Client, symbol_pair, order_id, buy_amount, new_price):
+
+    try:
+
+        # First, cancel the original order
+        cancel_response = client.futures_cancel_order(symbol=symbol_pair, orderId=order_id)
+        std_log(f"[{symbol_pair}] Original order canceled. Info: {cancel_response}")
+
+        # Then, place a new order with the updated price
+        new_order_response = place_new_futures_order(client, symbol_pair, buy_amount, new_price)
+        return new_order_response
+    
+    except Exception as e:
+        std_log(f"[{symbol_pair}] Error modifying order. Error Info: {e}")
+        return None
+    
 if __name__=="__main__":
     
     # Time Configurations For Trade Set-Up 👇
@@ -186,34 +208,39 @@ if __name__=="__main__":
     else: 
         client = Client(api_key=api_key, api_secret=api_secret, testnet=demo)
 
-    print('Starting')
-    # Starting the trade execution 👇
+    order_id = 0
+    remain = boundaryRemaining(candle_timeframe)   # Remain time to buy candle closing
+    showed_remain = min(remain, showed_remain)
+
+    initial_chart_df = fetch_and_store_data(client, symbol_pair, candle_timeframe)
+    initialEMA = round(initial_chart_df['close'].ewm(span=moving_average_span, adjust=False).mean().iloc[-1], 4)
+    
+    # Place first order
+    order_info = place_new_futures_order(client, symbol_pair, buy_amount, initialEMA)
+    
+    if order_info is not None:
+        order_id = order_info['orderId']
+
     while True:
 
-        remain = boundaryRemaining(candle_timeframe)   # Remain time to buy candle closing
-        showed_remain = min(remain, showed_remain)
-            
+        status = check_order_status(client, symbol_pair, order_id)
+
         if old_remain_long_buy[symbol_pair] < remain: # Get into new candle
 
-            # Retrieving latest candles data:
-            chart_df = fetch_and_store_data(client, symbol_pair, candle_timeframe)
-        
-            # Removing the excessive candle
-            if chart_df.index[-1] > datetime.datetime.utcnow() - buy_timedelta[symbol_pair]/2:
-                chart_df = chart_df.iloc[:-1] 
+            std_log("[%s] New Bar: %s" %(symbol_pair, remain))
 
-            last_close_price = fetch_latest_closing_price(chart_df)
+            if status and status['status'] != 'FILLED':
 
-            longEMA = round(chart_df['close'].ewm(span=moving_average_span, adjust=False).mean().iloc[-1], 4)
+                # Retrieving latest candles data:
+                chart_df = fetch_and_store_data(client, symbol_pair, candle_timeframe)
+            
+                # Removing the excessive candle
+                if chart_df.index[-1] > datetime.datetime.utcnow() - buy_timedelta[symbol_pair]/2:
+                    chart_df = chart_df.iloc[:-1] 
 
-            if last_close_price > longEMA:
-                order_executed = place_futures_order(client, symbol_pair, buy_amount, last_close_price)
+                ema = round(chart_df['close'].ewm(span=moving_average_span, adjust=False).mean().iloc[-1], 4)
 
-                # If the order is executed, the loop breaks:
-                if order_executed:
-                    break
-            else:
-                std_log("[%s]  Last Bar Close [%s]<= Long EMA [%s]" %(symbol_pair, last_close_price, longEMA))
+                modify_order(client=client, symbol_pair=symbol_pair, order_id=order_id, buy_amount=buy_amount, new_price=ema)
 
 
         old_remain_long_buy[symbol_pair] = remain
