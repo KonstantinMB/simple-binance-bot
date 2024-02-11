@@ -11,8 +11,8 @@ import os
 load_dotenv() 
 
 # Configs for DEMO Account
-test_api_key='a279adac61711b474300df320a1fda8848b79acff304ab2191d0245198f9ce4a'
-test_api_secret='8797f1bbd9d44252b698f8dc7deec2ff26fb9e303adcdec83642a98990aee8e1'
+test_api_key=os.getenv('TEST_API_KEY')
+test_api_secret=os.getenv('TEST_API_SECRET')
 
 # Configs for REAL
 api_key = os.getenv('API_KEY')
@@ -283,7 +283,7 @@ if __name__=="__main__":
                 # Retrieving latest OHCL & EMA data:
                 chart_df, ema = get_crypto_data(client, symbol_pair, candle_timeframe)
 
-                std_log("[%s] New Bar 👇 \n%s" %(symbol_pair, chart_df.iloc[-1]))
+                std_log("[%s] New Bar: %s" %(symbol_pair, chart_df.iloc[-1]))
 
                 new_order_info = modify_order(client=client, symbol_pair=symbol_pair, order_id=order_id, buy_amount=buy_amount, new_price=ema)
                 update_order_id(new_order_info)
