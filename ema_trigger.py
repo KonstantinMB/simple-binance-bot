@@ -29,6 +29,19 @@ buy_amount = 100
 demo = True
 moving_average_span = 26
 order_id = 0
+stop_loss_percent = 0.02
+take_profit_percent = 0.1
+
+price_precision, quantity_precision, order_quantity = 0, 0, 0
+
+# TODO:
+# ✅ Fix the order_status to be looked at only upon new candle
+
+# ✅ Do you want to place a stop_loss/take_profit prices after the postion is FILLED 👇
+stop_trigger_toggle = True
+
+# ✅ We support only MARKET (for MARKET_ORDER) or LIMIT (for LIMIT_MARKET_ORDER) orders 👇
+order_type = 'LIMIT'
 
 def boundaryRemaining(tf):
         # "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "3d", "1w", "1M"
@@ -164,14 +177,43 @@ def get_precision_for_symbol(client: Client, symbol):
         
     return None, None  # In case the symbol is not found
 
-def place_new_futures_order(client: Client, symbol_pair, buy_amount, limit_price,
+def place_new_futures_market_order(client: Client, symbol_pair, buy_amount,
+                                   positionSide='LONG', side=BaseClient.SIDE_BUY):
+    
+    global quantity_precision, order_quantity
+    _, quantity_precision = get_precision_for_symbol(client, symbol_pair)
+
+    latest_price_info = client.futures_symbol_ticker(symbol=symbol_pair)
+    latest_price = float(latest_price_info['price'])
+    order_quantity = round(buy_amount / latest_price, quantity_precision)
+
+    try:
+        order_info = client.futures_create_order(
+            symbol=symbol_pair,
+            side=side,
+            positionSide=positionSide,
+            type=BaseClient.ORDER_TYPE_MARKET,  # Change to market order type
+            quantity=order_quantity,
+            recvWindow=10000
+        )
+
+        std_log(f"[{symbol_pair}] MARKET Buy Order Executed. Order Info: {order_info}")
+        return order_info
+
+    except Exception as e:
+        std_log(f"[{symbol_pair}] An error occurred while making a market order. Error Info: {e}")
+        return None
+
+
+def place_new_futures_limit_order(client: Client, symbol_pair, buy_amount, limit_price,
                         positionSide = 'LONG',
                         side = BaseClient.SIDE_BUY, 
                         type = BaseClient.FUTURE_ORDER_TYPE_LIMIT):
 
+    global price_precision, quantity_precision, order_quantity
     price_precision, quantity_precision = get_precision_for_symbol(client, symbol_pair)
     price = round(limit_price, price_precision)
-    quantity = round((buy_amount / limit_price), quantity_precision)
+    order_quantity = round((buy_amount / limit_price), quantity_precision)
 
     try:
 
@@ -181,7 +223,7 @@ def place_new_futures_order(client: Client, symbol_pair, buy_amount, limit_price
             positionSide=positionSide,
             type=type,
             price=price,
-            quantity=quantity,
+            quantity=order_quantity,
             recvWindow= 10000000,
             timeInForce='GTC'
         )
@@ -225,22 +267,76 @@ def update_order_id(order_info):
 
     return order_id
     
+
+def fetch_last_close_price(chart_df: DataFrame):
+
+    return chart_df['close'].iloc[-1]
+
 def modify_order(client: Client, symbol_pair, order_id, buy_amount, new_price):
 
-    try:
+    global order_type
 
+    try:
         # First, cancel the original order
         cancel_response = client.futures_cancel_order(symbol=symbol_pair, orderId=order_id)
         std_log(f"[{symbol_pair}] Original order canceled. Info: {cancel_response}")
 
         # Then, place a new order with the updated price
-        new_order_response = place_new_futures_order(client, symbol_pair, buy_amount, new_price)
+        new_order_response = place_futures_order(client, symbol_pair, buy_amount, new_price, order_type)
         return new_order_response
     
     except Exception as e:
         std_log(f"[{symbol_pair}] Error modifying order. Error Info: {e}")
         return None
     
+def place_stop_triggers(client: Client, symbol, last_close_price):
+
+    global price_precision, quantity_precision, order_quantity
+    take_profit_price = round(last_close_price * (1 + take_profit_percent), price_precision)
+    stop_loss_price = round(last_close_price * (1 - stop_loss_percent), price_precision)
+
+    take_profit_market_order= client.futures_create_order(
+        symbol=symbol,
+        side=BaseClient.SIDE_SELL,
+        positionSide='LONG',
+        type=BaseClient.FUTURE_ORDER_TYPE_TAKE_PROFIT_MARKET,
+        timeInForce=BaseClient.TIME_IN_FORCE_GTC,
+        stopPrice=take_profit_price,
+        closePosition=True
+        )
+    
+    std_log("[%s] TAKE_PROFIT_MARKET Buy Order Executed. Order Info: %s" %(symbol, str(take_profit_market_order)))
+
+    stop_market_order = client.futures_create_order(
+        symbol=symbol,
+        side=BaseClient.SIDE_SELL,
+        positionSide='LONG',
+        type=BaseClient.FUTURE_ORDER_TYPE_STOP_MARKET,
+        quantity=order_quantity,
+        stopPrice=stop_loss_price,
+        closePosition=True
+    )
+
+    std_log("[%s] STOP_MARKET Buy Order Executed. Order Info: %s" %(symbol, str(stop_market_order)))
+
+
+def place_futures_order(client: Client, symbol_pair, buy_amount, initialEMA, order_type):
+
+    new_order_info = ''
+
+    if order_type == 'LIMIT':
+        new_order_info = place_new_futures_limit_order(client, symbol_pair, buy_amount, initialEMA)
+
+    elif order_type == 'MARKET': 
+        new_order_info = place_new_futures_market_order(client, symbol_pair, buy_amount)
+
+    else:
+        std_log(f"[{symbol_pair}] Invalid ORDER TYPE {order_type}. Please use LIMIT or MARKET orders only!")
+
+    update_order_id(new_order_info)
+
+    return new_order_info
+
 if __name__=="__main__":
     
     # Time Configurations For Trade Set-Up 👇 
@@ -265,25 +361,27 @@ if __name__=="__main__":
 
     # Retrieve OHLC & EMA Data 
     initial_chart_df, initialEMA = get_crypto_data(client, symbol_pair, candle_timeframe)
+    last_close_price = fetch_last_close_price(initial_chart_df)
     
     # Place first order
-    order_info = place_new_futures_order(client, symbol_pair, buy_amount, initialEMA)
-    update_order_id(order_info)
+    order_info = place_futures_order(client, symbol_pair, buy_amount, initialEMA, order_type)
+    status = check_order_status(client, symbol_pair, order_id)
 
     while True:
 
         showed_remain = datetime.timedelta(days=365)
-        status = check_order_status(client, symbol_pair, order_id)
-
         remain = boundaryRemaining(candle_timeframe)   # Remain time to buy candle closing
         showed_remain = min(remain, showed_remain)
         
         if old_remain_long_buy[symbol_pair] < remain: # Get into new candle
 
+            status = check_order_status(client, symbol_pair, order_id)
+
             if status['status'] != 'FILLED':
 
                 # Retrieving latest OHCL & EMA data:
                 chart_df, ema = get_crypto_data(client, symbol_pair, candle_timeframe)
+                last_close_price = fetch_last_close_price(chart_df)
 
                 std_log("[%s] New Bar: %s" %(symbol_pair, chart_df.iloc[-1]))
 
@@ -292,6 +390,9 @@ if __name__=="__main__":
             
             else:
                 # should be FILLED in that case
+                if stop_trigger_toggle:
+                    place_stop_triggers(client,  symbol_pair, last_close_price)
+                    
                 break
 
         old_remain_long_buy[symbol_pair] = remain
