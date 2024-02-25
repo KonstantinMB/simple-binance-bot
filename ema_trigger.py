@@ -25,9 +25,10 @@ intra_day_excel = config_path + "IntraDayData.xlsx"
 # Trade Configurations
 symbol_pair = 'BTCUSDT'
 candle_timeframe = "1m"
-buy_amount = 5000
+buy_amount = 100
 demo = True
 moving_average_span = 26
+order_id = 0
 
 def boundaryRemaining(tf):
         # "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "3d", "1w", "1M"
@@ -181,6 +182,7 @@ def place_new_futures_order(client: Client, symbol_pair, buy_amount, limit_price
             type=type,
             price=price,
             quantity=quantity,
+            recvWindow= 10000000,
             timeInForce='GTC'
         )
 
@@ -216,9 +218,11 @@ def get_crypto_data(client: Client, symbol_pair, timeframe):
     return chart_df, chart_df['ema'].iloc[-1]
 
 def update_order_id(order_info):
-
+    
+    global order_id
     if order_info is not None:
         order_id = order_info['orderId']
+
     return order_id
     
 def modify_order(client: Client, symbol_pair, order_id, buy_amount, new_price):
@@ -264,8 +268,6 @@ if __name__=="__main__":
     
     # Place first order
     order_info = place_new_futures_order(client, symbol_pair, buy_amount, initialEMA)
-    
-    order_id = 0
     update_order_id(order_info)
 
     while True:
@@ -289,6 +291,7 @@ if __name__=="__main__":
                 update_order_id(new_order_info)
             
             else:
+                # should be FILLED in that case
                 break
 
         old_remain_long_buy[symbol_pair] = remain
