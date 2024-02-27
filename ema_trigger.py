@@ -4,6 +4,9 @@ import pandas as pd # Run `pip install pyarrow` if deprecation notice occurs
 import time
 import openpyxl
 import datetime
+import numpy as np
+import matplotlib.pyplot as plt
+import mplfinance as mpf
 
 # To load the API_KEYs & API_SECRETs, we load them from a .env file
 from dotenv import load_dotenv
@@ -20,6 +23,7 @@ api_secret = os.getenv('API_SECRET')
 
 # Configs for logging & saving data
 config_path = str(os.getenv('CONFIG_PATH'))
+chart_config_path = config_path + "Chart.png"
 intra_day_excel = config_path + "IntraDayData.xlsx"
 
 # Trade Configurations
@@ -31,17 +35,17 @@ moving_average_span = 26
 order_id = 0
 stop_loss_percent = 0.02
 take_profit_percent = 0.1
+HHV = 10
+LLV = 10
+
+# Do you want to add stop_loss/take_profit prices once the order is FILLED 👇
+stop_trigger_toggle = True
+
+# We support only MARKET (for MARKET_ORDER) or LIMIT (for LIMIT_MARKET_ORDER) orders 👇
+order_type = 'LIMIT'
 
 price_precision, quantity_precision, order_quantity = 0, 0, 0
 
-# TODO:
-# ✅ Fix the order_status to be looked at only upon new candle
-
-# ✅ Do you want to place a stop_loss/take_profit prices after the postion is FILLED 👇
-stop_trigger_toggle = True
-
-# ✅ We support only MARKET (for MARKET_ORDER) or LIMIT (for LIMIT_MARKET_ORDER) orders 👇
-order_type = 'LIMIT'
 
 def boundaryRemaining(tf):
         # "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "3d", "1w", "1M"
@@ -204,7 +208,6 @@ def place_new_futures_market_order(client: Client, symbol_pair, buy_amount,
         std_log(f"[{symbol_pair}] An error occurred while making a market order. Error Info: {e}")
         return None
 
-
 def place_new_futures_limit_order(client: Client, symbol_pair, buy_amount, limit_price,
                         positionSide = 'LONG',
                         side = BaseClient.SIDE_BUY, 
@@ -255,9 +258,69 @@ def get_crypto_data(client: Client, symbol_pair, timeframe):
     
     chart_df['ema'] = round(chart_df['close'].ewm(span=moving_average_span, adjust=False).mean(), 4)
     
+    # Bollinger Bands
+    chart_df['20 Day MA'] = chart_df['close'].rolling(window=20).mean()
+    chart_df['20 Day STD'] = chart_df['close'].rolling(window=20).std()
+    chart_df['Upper Band'] = chart_df['20 Day MA'] + (chart_df['20 Day STD'] * 2)
+    chart_df['Lower Band'] = chart_df['20 Day MA'] - (chart_df['20 Day STD'] * 2)
+
+    # Simple Moving Averages
+    chart_df['SMA_10'] = chart_df['close'].rolling(window=10).mean()
+    chart_df['SMA_50'] = chart_df['close'].rolling(window=50).mean()
+    chart_df['SMA_200'] = chart_df['close'].rolling(window=200).mean()
+
+    # Exponential Moving Averages
+    chart_df['EMA_12'] = chart_df['close'].ewm(span=12, adjust=False).mean()
+    chart_df['EMA_26'] = chart_df['close'].ewm(span=26, adjust=False).mean()
+
+    # Moving Average Convergence Divergence
+    chart_df['MACD_line'] = chart_df['EMA_12'] - chart_df['EMA_26']
+    chart_df['Signal_line'] = chart_df['MACD_line'].ewm(span=9, adjust=False).mean()
+    chart_df['MACD_Hist'] = chart_df['MACD_line'] - chart_df['Signal_line']
+
+    # Calculate ATR
+    chart_df['TR'] = np.maximum(chart_df['high'] - chart_df['low'],
+                                np.maximum(abs(chart_df['high'] - chart_df['close'].shift()),
+                                           abs(chart_df['low'] - chart_df['close'].shift())))
+    chart_df['ATR_20'] = chart_df['TR'].rolling(window=20).mean()
+
+    # Calculate Highest High and Lowest Low
+    chart_df['Highest_High_15'] = chart_df['high'].rolling(window=HHV).max()
+    chart_df['Lowest_Low_10'] = chart_df['low'].rolling(window=LLV).min()
+
     update_excel_with_new_data(intra_day_excel, symbol_pair, chart_df)
 
+    # We are making a visual chart for better trade visibility (Chart.png)
+    plot_crypto_chart_with_indicators(chart_df, chart_config_path)
+
     return chart_df, chart_df['ema'].iloc[-1]
+
+def plot_crypto_chart_with_indicators(chart_df: DataFrame, file_path: str, symbol_pair: str):
+    
+    # Ensure the DataFrame's index is a DatetimeIndex
+    chart_df.index = pd.to_datetime(chart_df.index)
+    
+    # Define additional plots
+    apds = [
+        mpf.make_addplot(chart_df['ema'], color='blue'),
+        mpf.make_addplot(chart_df['20 Day MA'], color='red'),
+        mpf.make_addplot(chart_df['Upper Band'], color='green'),
+        mpf.make_addplot(chart_df['Lower Band'], color='green'),
+        mpf.make_addplot(chart_df['SMA_10'], color='orange'),
+        mpf.make_addplot(chart_df['SMA_50'], color='purple'),
+        mpf.make_addplot(chart_df['SMA_200'], color='black'),
+        mpf.make_addplot(chart_df['MACD_line'], panel=1, color='fuchsia'),
+        mpf.make_addplot(chart_df['Signal_line'], panel=1, color='b'),
+        mpf.make_addplot(chart_df['MACD_Hist'], panel=1, type='bar', color='dimgray', alpha=0.3),
+    ]
+
+    # Define the market colors and style
+    mc = mpf.make_marketcolors(up='green', down='red', inherit=True)
+    s = mpf.make_mpf_style(marketcolors=mc)
+    
+    # Plotting
+    mpf.plot(chart_df, type='candle', style=s, addplot=apds, volume=True, figratio=(12, 8), 
+             title="\n" + symbol_pair + " Chart with Indicators", savefig=file_path)
 
 def update_order_id(order_info):
     
@@ -267,7 +330,6 @@ def update_order_id(order_info):
 
     return order_id
     
-
 def fetch_last_close_price(chart_df: DataFrame):
 
     return chart_df['close'].iloc[-1]
@@ -319,7 +381,6 @@ def place_stop_triggers(client: Client, symbol, last_close_price):
 
     std_log("[%s] STOP_MARKET Buy Order Executed. Order Info: %s" %(symbol, str(stop_market_order)))
 
-
 def place_futures_order(client: Client, symbol_pair, buy_amount, initialEMA, order_type):
 
     new_order_info = ''
@@ -359,11 +420,11 @@ if __name__=="__main__":
     else: 
         client = Client(api_key=api_key, api_secret=api_secret, testnet=demo)
 
-    # Retrieve OHLC & EMA Data 
-    initial_chart_df, initialEMA = get_crypto_data(client, symbol_pair, candle_timeframe)
-    last_close_price = fetch_last_close_price(initial_chart_df)
+    # Retrieve OHLC & Other Indicators Data
+    chart_df, initialEMA = get_crypto_data(client, symbol_pair, candle_timeframe)
+    last_close_price = fetch_last_close_price(chart_df)
     
-    # Place first order
+    # Place First Order
     order_info = place_futures_order(client, symbol_pair, buy_amount, initialEMA, order_type)
     status = check_order_status(client, symbol_pair, order_id)
 
